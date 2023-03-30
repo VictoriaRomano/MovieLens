@@ -1,0 +1,428 @@
+---
+title: "MovieLens project"
+author: "Viktoriia Pylypets_Romaniuk"
+date: "2023-03-19"
+output:
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Recommendation system project using the MovieLens dataset
+
+### 1.Introduction
+
+The goal of MovieLens project is to train a machine learning algorithm, which will predict the movie rating, that certain user will give. For estimating accuracy of this algorithm we will compute the root mean squared error(RMSE).In this project we aim to achieve the RMSE result less than 0.86490.In the project we try 2 approaches to solve the problem - model that uses movie and user effect and matrix factorization model, which is a popular technique to solve the recommendation system problem.
+
+### 2.Data preparation
+For this project we use MovieLens dataset, that has 10M ratings. We get it from GroupLens site.
+On this site we can find datasets with information collected from MovieLens site. MovieLens(http://movielens.org) is a web site that helps people find movies to watch. It has a huge number of registered users, that give ratings to movies.
+
+First of all we need download the dataset and unzip it. After we create the edx dataset for training purposes and final holdout test for testing our final model.
+```{r download files}
+##########################################################
+# Create edx and final_holdout_test sets 
+##########################################################
+
+# Note: this process could take a couple of minutes
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(recosystem)) install.packages("recosystem",repos = "http://cran.us.r-project.org" )
+
+library(tidyverse)
+library(caret)
+library(recosystem)
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+options(timeout = 120)
+
+dl <- "ml-10M100K.zip"
+if(!file.exists(dl))
+  download.file("https://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings_file <- "ml-10M100K/ratings.dat"
+if(!file.exists(ratings_file))
+  unzip(dl, ratings_file)
+
+movies_file <- "ml-10M100K/movies.dat"
+if(!file.exists(movies_file))
+  unzip(dl, movies_file)
+```
+After downloading and unzipping we create edx set(90%) - for training and testing purposes of different models and final_holdout set(10%) - for our final model testing. Also we make sure that all users and movies that in final_holdout test also in edx set.
+
+```{r edx and holdout set create}
+ratings <- as.data.frame(str_split(read_lines(ratings_file), fixed("::"), simplify = TRUE),
+                         stringsAsFactors = FALSE)
+colnames(ratings) <- c("userId", "movieId", "rating", "timestamp")
+ratings <- ratings %>%
+  mutate(userId = as.integer(userId),
+         movieId = as.integer(movieId),
+         rating = as.numeric(rating),
+         timestamp = as.integer(timestamp))
+
+movies <- as.data.frame(str_split(read_lines(movies_file), fixed("::"), simplify = TRUE),
+                        stringsAsFactors = FALSE)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- movies %>%
+  mutate(movieId = as.integer(movieId))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Final hold-out test set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding") # if using R 3.6 or later
+# set.seed(1) # if using R 3.5 or earlier
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in final hold-out test set are also in edx set
+final_holdout_test <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from final hold-out test set back into edx set
+removed <- anti_join(temp, final_holdout_test)
+edx <- rbind(edx, removed)
+# remove from memory unnecessary information
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+```
+### 3.Data exploratory analysis
+Let's start to explore edx dataset.We can see that it is a table in tidy format and contains 9000055 rows and 6 columns with names userId, movieID, rating, timestamp, title and genres. It has 10677 different movies and 69878 different users.
+
+
+```{r structure and number of movies and users}
+#Check the number of columns and rows in edx set
+dim(edx)
+
+#Have a look of first rows of edx set and names of columns
+head(edx)
+
+#Check the number of different movies
+n_distinct(edx$movieId)
+
+# Check the number of different users
+n_distinct(edx$userId)
+```
+Also we check if our dataset has NA. It does not.
+```{r checking na}
+# Check if we have some NA
+sum(is.na(edx))
+```
+
+Next, we would like to explore how ratings are distributed. For this purpose we will make a plot. From it we can see that user a willing to give an integer instead of half-starred rating.The most often given rating is 4.  
+
+
+```{r rating distribution, echo=FALSE}
+# Check rating distribution
+edx %>%
+  group_by(rating) %>%
+  summarize(count = n()) %>%
+  ggplot(aes(x = rating, y = count)) +
+  geom_bar(stat = "identity") +
+  xlab("Rating") + ggtitle("Distribution of ratings") 
+```
+On the figure "Number of ratings per movie" we can see that we have movies, that were rated more than 10000 times and movies with a very few ratings. Most of the movies have 10-3000 ratings. Some movies have more than 10000 ratings 
+```{r movie-rating , echo=FALSE}
+#Check if some movies were rated more often than others 
+# to br we assign a vector of minor break values
+br <-unique(as.numeric(1:10 %o% 10 ^ (0:3)))
+edx %>% 
+  dplyr::count(movieId) %>% 
+  ggplot(aes(n)) + 
+  geom_histogram(bins = 40, color = "blue") + 
+  scale_x_log10(breaks = scales::breaks_log(10),minor_breaks = br) + 
+  ggtitle("Number of ratings per movie") +
+  ylab("Number of movies")+
+  xlab("Number or ratings per movie")
+```
+Figure "Number of ratings per user" shows us that some users are more active than others. Most of them rated 20-500 movies.
+```{r user-rating, echo=FALSE}
+#Check if some users rated movies more often than others and how numbers of ratings
+#distributed between users
+#Check if some users rated movies more often than others and how numbers of ratings
+#distributed between users
+edx %>% 
+  dplyr::count(userId) %>% 
+  ggplot(aes(n)) + 
+  geom_histogram(bins = 40, color = "red") + 
+  scale_x_log10(breaks = scales::breaks_log(10),minor_breaks = br ) + 
+  ggtitle("Number of users with certain number of ratings")+
+  ylab("Number of users")+
+  xlab("Number of ratings per user")
+
+```
+### 4.Methods and analysis
+For training our models we create train set(which consist 80% of edx set) and test_set(20% of edx set) to test how our models perform. Also we make sure that we do not include movies and users in test set, which do not appear in train set.
+```{r create test and training set}
+#Create the test set and train set from edx set
+test_index_1 <- createDataPartition(y = edx$rating, times = 1,
+                                    p = 0.2, list = FALSE)
+train_set <- edx[-test_index_1,]
+temp_test_set <- edx[test_index_1,]
+
+#Make sure we do not include movies and users in the test set that do not appear in the train set
+test_set <- temp_test_set %>% 
+  semi_join(train_set, by = "movieId") %>%
+  semi_join(train_set, by = "userId")
+
+# Add rows removed from the testing set back into the training set set
+removed <- anti_join(temp_test_set, test_set)
+train_set <- rbind(train_set, removed)
+
+```
+For calculating RMSE (root mean squared error) we create a function:
+```{r RMSE function}
+#Function for calculating RMSE
+RMSE <- function(true_ratings, predicted_ratings){
+  sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+```
+Next, we calculate the average rating  for all users across all movies. In the train set it is 3.512
+```{r avrerage rating}
+#Compute the average rating for all users across all movies
+mu <- mean(train_set$rating)
+mu
+```
+### 4.1.Just the average model
+The first model we try is the model, where all predicted ratings are the average rating across all movies. In the table we can see that just the average model gives us RMSE=1.06, which is not our goal.
+```{r just the average model}
+#Compute  RMSE if we assign all predicted ratings to the average rating
+naive_rmse <- RMSE(test_set$rating, mu)
+naive_rmse
+
+#Make tibble with RMSE results
+model_result <- tibble(Model = "Just the average",
+                       RMSE = naive_rmse)
+model_result
+```
+### 4.2. Movie and user effect model
+Let's try to find out if some movies have higher than average ratings and if there some relationship how often movie was rated and was rating it got. Because we can assume that more popular movies have more ratings and their rating is somewhat higher than the average rating across all movies. For this purpose we built a plot, where we can see a relationship between how often movie was rated and its rating. To make more clear is this rating above or less than average across all movies we add an intercept red line.
+From this figure we can see that movies with a lot of ratings tend to have higher average rating.
+
+```{r number of ratings - average movie rating}
+#Check if there are some relationship between number of movie ratings and average rating of the movie
+num_rate <-test_set %>% 
+  group_by(movieId) %>%
+  summarize(n = n(),
+            rating = mean(rating))
+head(num_rate)
+num_rate %>% ggplot(aes(n, rating)) + geom_point() + geom_hline(yintercept = 3.51, col = "red")+
+  ggtitle("Relationship between how often movie was rated and average rating")
+
+```
+Next, let's check the situation if user rated more movies, how it affects the average
+rating this user gives. We plot number of ratings per user versus average rating user gives with blue intercept that shows average rating for all users across all movies. We can see an almost normal distribution of ratings with a very slight tendency to give a little bit lower ratings for users who rated a lot of movies.
+```{r number of ratings - average user rating}
+# Check if there are some relationship between how many movies user rated and
+#average rating this user gives to movies
+user_rate <- test_set%>% 
+  group_by(userId) %>%
+  summarize(n = n(),
+            rating = mean(rating))
+head(user_rate)
+user_rate %>% ggplot(aes(n, rating)) + geom_point() + geom_hline(yintercept = 3.51, col = "blue")+
+  ggtitle("Relationship betwen how many movies user rated and his average rating")
+```
+### 4.2.1.Movie effect model
+From the previous figure "Relationship between how often movie was rated and average rating" we can see some movies have higher rating than others. For our movie effect model we calculate b_i, which is the difference between average rating across all movies and average rating of certain movie.Our movie effect model predicts the ratings simply by adding to average rating across all movie the value of b_i, that this movie has. This model gives us RMSE = 0.9437, which is better than just the average model.
+```{r movie effect model}
+#calculate b_i (a difference between average movie rating and average rating across all movies) 
+movie_avgs <- train_set %>% 
+  group_by(movieId) %>% 
+  summarize(b_i = mean(rating - mu))
+# Calculate predicted rating by adding movie effect b_i to average rating across all movies
+predicted_ratings <- test_set %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  mutate(pred = mu + b_i) %>%
+  .$pred
+head(predicted_ratings) # just for checking that we got what we want
+
+# calculate movie model RMSE
+model_movie_rmse <- RMSE(predicted_ratings, test_set$rating)
+model_movie_rmse
+
+# Add movie model RMSE to the table
+model_result <- bind_rows(model_result, tibble(Model = "Movie effect",
+                                               RMSE = model_movie_rmse))
+model_result
+
+```
+Let's check how this model perform if we will predict for movie just the average across all movies(b_i = 0), if this movie has less than m ratings; and average + b_i, if it has more.
+We try values for m from 0 to 10. On the plot we can see that this model doesn't give us any improvements in RMSE.
+```{r adj movie effect model}
+# check what result it will give, if we calculate b-i(movie effect) in the case when movie has
+# more than m ratings, and if less, we assign the predicted rating to average rating across all movies 
+
+m <- seq(0, 10, 1)
+
+rmses <- sapply(m, function(m){
+  movie_avgs_reg <- train_set %>% 
+    group_by(movieId) %>% 
+    summarize(b_i = ifelse(n()>m,mean(rating - mu),0))
+  
+  predicted_ratings <- test_set %>% left_join(movie_avgs_reg, by='movieId') %>%
+    mutate(pred = mu + b_i) %>%
+    .$pred  
+  return(RMSE(predicted_ratings, test_set$rating))
+})
+qplot(m, rmses)  
+m[which.min(rmses)]
+
+```
+### 4.2.2.Movie-user model
+Next we will try to add to our movie effect model user effect. In this model we assume that some users are tend to give lover ratings and some - higher.For this model we calculate b_u - the difference between the average rating certain user gives and the average rating across all movies minus movie effect b_i.From the result table we can see that adding user effect to our model give us better RMSE. Now it is 0.866
+```{r movie-user model}
+# calculate b_u(the difference between average rating the user gives and average rating across all movies
+# and b_i)
+movie_user_avgs <- train_set %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  group_by(userId) %>%
+  summarize(b_u = mean(rating - mu - b_i))
+# Calculate predicted ratings, using b_u
+predicted_ratings <- test_set %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(movie_user_avgs, by='userId') %>%
+  mutate(pred = mu + b_i + b_u) %>%
+  .$pred
+# Calculate RMSE for movie-user model
+model_movie_user_rmse <- RMSE(predicted_ratings, test_set$rating)
+model_movie_user_rmse
+
+#Add RMSE results of movie_user model to results table
+model_result <- bind_rows(model_result, tibble(Model = "Movie-user effect",
+                                               RMSE = model_movie_user_rmse))
+model_result
+```
+Let's check if we will see some improvements, if in our model use user effect, if user rated more than z movies.From the plot we can see that we have almost the same RMSE, if we don't use user effect in situation when user rated 6 and less movies.
+
+```{r adj movie-user model}
+#check, if we will ignore users who rated less than z movies
+z<- seq(0,10,1)
+rmses <- sapply(z, function(z){
+  movie_user_avgs_reg <- train_set %>% 
+    left_join(movie_avgs, by='movieId') %>%
+    group_by(userId) %>%
+    summarize(b_u = ifelse(n() > z, mean(rating - mu - b_i),0))
+  predicted_ratings <- test_set %>% 
+    left_join(movie_avgs, by='movieId') %>%
+    left_join(movie_user_avgs_reg, by='userId') %>%
+    mutate(pred = mu + b_i + b_u) %>%
+    .$pred
+  return(RMSE(predicted_ratings, test_set$rating))
+})
+qplot(z, rmses)  
+z[which.min(rmses)]
+```
+
+### 4.3. Parallel Matrix Factorization model using recosystem package
+### 4.3.1.Recommender system with default parameters
+
+A popular technique to solve the recommender system problem is the matrix factorization method.For that we use recosystem package.Recosystem is an R wrapper of the LIBMF library developed by Yu-Chin Juan, Wei-Sheng Chin, Yong Zhuang, Bo-Wen Yuan, Meng-Yuan Yang, and Chih-Jen Lin, an open source library for recommender system using parallel matrix factorization.
+
+LIBMF is a high-performance C++ library for large scale matrix factorization. LIBMF itself is a parallelized library, meaning that users can take advantage of multicore CPUs to speed up the computation. It also utilizes some advanced CPU features to further improve the performance. (Chin, Yuan, et al. 2015)
+
+For training and testing this model we have to change the data format.For training we use model with default parameters.This recommender model gives us RMSE=0.8345, which is much better than previous models.
+```{r reco model}
+set.seed(5, sample.kind = "Rounding")
+# Return data format for train_set
+train_reco <- with(train_set, data_memory(user_index = userId, item_index = movieId,
+                                          rating = rating))
+
+#Return data format for test set
+test_reco <- with(test_set, data_memory(user_index = userId, item_index = movieId, 
+                                        rating = rating))
+
+#Return an object of class "RecoSys"
+recommendation_system <- Reco()
+
+#Train the model with default parameters
+recommendation_system$train(train_reco)
+
+#Calculate predicted ratings with default model
+predicted_ratings <-  recommendation_system$predict(test_reco, out_memory())
+
+#Calculate RMSE of default matrix factorization model
+reco_model <- RMSE(predicted_ratings, test_set$rating)
+reco_model
+
+#Add RMSE results of reco_model to the results table
+model_result <- bind_rows(model_result, tibble(Model = "Matrix fact",
+                                               RMSE = reco_model))
+model_result
+```
+### 4.3.2.Recommender system with tuned parameters
+We can see that previous model gives a result, that we wanted. Let's explore, if tuning this model will give us even better results.We tune number of latent factors and the learning rate. Tuned model gives us even better RMSE=0.790  with latent factors = 30 and learning rate = 0.1.
+```{r tuned reco model}
+# Tune the model parameters, using cross validation - takes time(around 20 min)
+set.seed(5, sample.kind = "Rounding")
+tuning <- recommendation_system$tune(train_reco, opts = list(dim = c(20L, 30L),
+                                                             lrate = c(0.05, 0.1),
+                                                             nthread  = 6,
+                                                             niter = 10))
+# Check which tuning parameters work the best                                                                   
+tuning$min
+
+#Train the model using tuned parameters
+recommendation_system$train(train_reco, opts = c(tuning$min,
+                                                 nthread = 4,
+                                                 niter = 25))
+# Calculate the predicted ratings using tuned model
+predicted_ratings <-  recommendation_system$predict(test_reco, out_memory())
+
+#Calculate RMSE of tuned model
+reco_model_tuned <- RMSE(predicted_ratings, test_set$rating)
+reco_model_tuned
+
+#Add results of tuned recosystem model to the results table
+model_result <- bind_rows(model_result, tibble(Model = "Matrix fact tuned",
+                                               RMSE = reco_model_tuned))
+model_result
+
+```
+### 5.Results.Tuned matrix factorization model testing on the final holdout test
+As we can see the tuned matrix factorization model gives us the best RMSE.Let's check, what result this model give us on final holdout test. We can see, that RMSE is very close to result, what we had on the test set. Using this model we get RMSE = 0.7898,
+which is according to our assessment conditions, is a good result.
+```{r final model testing}
+## Check the results on Final holdout test set using tuned recosystem model##
+
+#Prepare data format for the recosystem model
+final_test_reco <- with(final_holdout_test,data_memory(user_index = userId, 
+                                                       item_index = movieId, 
+                                                       rating= rating))
+# Compute predicted ratings
+final_predicted_ratings <- recommendation_system$predict(final_test_reco, out_memory())
+
+# Compute RMSE
+reco_model_final_rmse <- RMSE(final_predicted_ratings, final_holdout_test$rating)
+reco_model_final_rmse
+
+```
+### 6.Conclusion
+In the project we tried two ways to get RMSE lower than 0.86499. The formula in the first movie-user model looks like this:
+   Y(i,u) = average(mu) + movie-effect(b_i) + user-effect(b_u),
+where:
+   Y(i,u) - predicted rating for movie by certain user
+   average(mu) - average movie rating across all users for all movies
+   movie-effect(b_i) - the difference between average movie rating and average rating across all users and all movies
+   user-effect(b_u) - average rating certain user gives minus  sum of average(mu) and minus movie-effect(b_i)
+The movie-user model gives us RMSE = 0.8661, which is a little bit more than we wanted. Also this model will not give us a good result, if we tried it on the data with new user or new movies.
+
+The second model we tried on is parallel matrix factorization using recosystem package.
+As shown by its performance on the test and final holdout test, recosystem model with default parameters gives us RMSE = 0.8345 and tuned recosystem model with latent factors = 30 and learning rate = 0.1 gives us better results: test set RMSE = 0.7898 and final holdout set RMSE = 0.7897. We can see, that our tuned recosystem model gives the same good RMSE result on the final holdout test as on the test set.
+
+### 7. Future work
+Using recosystem package, we can continue our work with tuning parameters as costp_l1, costp_l2, costq_l1, costq_l2 dim and lrate. More iterations could give us better RMSE results (but take more resources for computing).
+
+# References
+James Bennet, Stan Lanning.The Netflix Prize, 2007
+
+https://cran.r-project.org/web/packages/recosystem/vignettes/introduction.html
+
+Yixuan Qui, David Cortes, Chin-Jen Lin, Yu-Chin Juan,Wei-Sheng Chin,Yong Zhuang, Bo-Wen Yuan, Meng-Yuan Yang, and other contributors.Recommender system using Matrix Factorization. Package 'recosystem', 2022
